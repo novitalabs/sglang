@@ -2039,7 +2039,7 @@ class TokenizerManager(TokenizerCommunicatorMixin):
         state = self.rid_to_state[recv_obj.rid]
         state.finished = True
 
-        abort_message = recv_obj.abort_message or "Abort in waiting queue"
+        abort_message = recv_obj.abort_message or "Aborted"
         finish_reason = {
             "type": "abort",
             "message": abort_message,
@@ -2069,6 +2069,16 @@ class TokenizerManager(TokenizerCommunicatorMixin):
         }
         state.out_list.append(out)
         state.event.set()
+
+        if self.enable_metrics:
+            labels = {**self.metrics_collector.labels}
+            if recv_obj.abort_stage:
+                labels["stage"] = recv_obj.abort_stage
+            custom_labels = getattr(state.obj, "custom_labels", None)
+            if custom_labels:
+                labels.update(custom_labels)
+
+            self.metrics_collector.observe_one_aborted_request(labels)
 
     def _handle_open_session_req_output(self, recv_obj):
         self.session_futures[recv_obj.session_id].set_result(

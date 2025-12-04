@@ -1339,6 +1339,8 @@ class AbortReq(BaseReq):
     # The finished reason data
     finished_reason: Optional[Dict[str, Any]] = None
     abort_message: Optional[str] = None
+    # The stage at which the request was aborted
+    abort_stage: Optional[str] = None
 
     def __post_init__(self):
         # FIXME: This is a hack to keep the same with the old code

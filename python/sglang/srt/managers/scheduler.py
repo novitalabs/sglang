@@ -2341,11 +2341,27 @@ class Scheduler(
         barrier()
         return RpcReqOutput(success, "" if not exec else str(exec))
 
-    def abort_request(self, recv_req: AbortReq):
-        # Delete requests in the waiting queue
+    def _should_abort_request(self, recv_req: AbortReq, rid: str) -> bool:
+        """Check if a request should be aborted."""
+        return recv_req.abort_all or rid.startswith(recv_req.rid)
+
+    def _send_abort_output(
+        self, req, stage: RequestStage, message: Optional[str] = None
+    ) -> None:
+        """Send abort output to tokenizer."""
+        self.send_to_tokenizer.send_output(
+            AbortReq(
+                rid=req.rid,
+                abort_stage=stage.value,
+                abort_message=message,
+            ),
+            req,
+        )
+
+    def _abort_waiting_queue(self, recv_req: AbortReq):
         to_del = []
         for i, req in enumerate(self.waiting_queue):
-            if recv_req.abort_all or req.rid.startswith(recv_req.rid):
+            if self._should_abort_request(recv_req, req.rid):
                 to_del.append(i)
 
         # Sort in reverse order to avoid index issues when deleting
@@ -2355,73 +2371,85 @@ class Scheduler(
             # We still need to send something back to TokenizerManager to clean up the state.
             req = self.waiting_queue.pop(i)
             if self.enable_hicache_storage:
-                # to release prefetch events associated with the request
                 self.tree_cache.release_aborted_request(req.rid)
-            self.send_to_tokenizer.send_output(AbortReq(rid=req.rid), req)
+
             # For disaggregation decode mode, the request in the waiting queue has KV cache allocated.
             if self.disaggregation_mode == DisaggregationMode.DECODE:
                 release_kv_cache(req, self.tree_cache)
-
+                self._send_abort_output(req, RequestStage.DECODE_WAITING)
+            else:
+                self._send_abort_output(req, RequestStage.PREFILL_WAITING)
             # For mamba radix cache
             if req.mamba_pool_idx is not None:
                 release_kv_cache(req, self.tree_cache, is_insert=False)
-            logger.debug(f"Abort queued request. {req.rid=}")
-
-        # Delete the requests in the grammar queue
         for req in self.grammar_queue:
-            # Abort method 2: call `set_finish_with_abort`
-            # The request will still run one prefill forward pass.
-            # In this case, we change the input_ids to be only one token to make this prefill cheap.
-            if recv_req.abort_all or req.rid.startswith(recv_req.rid):
+            if self._should_abort_request(recv_req, req.rid):
                 logger.debug(f"Abort grammar queue request. {req.rid=}")
                 if req.grammar:
                     req.grammar.cancel()
                 req.set_finish_with_abort("Aborted by AbortReq.")
 
-        # Delete requests not in the waiting queue when PD disaggregation is enabled
-        if self.disaggregation_mode == DisaggregationMode.PREFILL:
-            # Abort requests that have not yet been bootstrapped
-            for req in self.disagg_prefill_bootstrap_queue.queue:
-                if recv_req.abort_all or req.rid.startswith(recv_req.rid):
-                    logger.debug(f"Abort bootstrap queue request. {req.rid=}")
-                    if hasattr(req.disagg_kv_sender, "abort"):
-                        req.disagg_kv_sender.abort()
+    def _abort_disagg_prefill_queues(self, recv_req: AbortReq):
+        # Abort requests that have not yet been bootstrapped
+        for req in self.disagg_prefill_bootstrap_queue.queue:
+            if self._should_abort_request(recv_req, req.rid):
+                logger.debug(f"Abort prefill bootstrap queue request. {req.rid=}")
+                if hasattr(req.disagg_kv_sender, "abort"):
+                    req.disagg_kv_sender.abort()
+                self._send_abort_output(req, RequestStage.PREFILL_BOOTSTRAP)
 
-            # Abort in-flight requests
-            for req in self.disagg_prefill_inflight_queue:
-                if recv_req.abort_all or req.rid.startswith(recv_req.rid):
-                    logger.debug(f"Abort inflight queue request. {req.rid=}")
-                    if hasattr(req.disagg_kv_sender, "abort"):
-                        req.disagg_kv_sender.abort()
+        # Abort in-flight requests (transferring KV cache)
+        for req in self.disagg_prefill_inflight_queue:
+            if self._should_abort_request(recv_req, req.rid):
+                logger.debug(f"Abort prefill inflight request. {req.rid=}")
+                if hasattr(req.disagg_kv_sender, "abort"):
+                    req.disagg_kv_sender.abort()
+                self._send_abort_output(req, RequestStage.PREFILL_TRANSFER_KV_CACHE)
 
-        elif self.disaggregation_mode == DisaggregationMode.DECODE:
-            # Abort requests that have not yet finished preallocation
-            for decode_req in self.disagg_decode_prealloc_queue.queue:
-                if recv_req.abort_all or decode_req.req.rid.startswith(recv_req.rid):
-                    logger.debug(f"Abort prealloc queue request. {decode_req.req.rid=}")
-                    decode_req.kv_receiver.abort()
+    def _abort_disagg_decode_queues(self, recv_req: AbortReq):
+        # Abort requests that have not yet finished preallocation
+        for decode_req in self.disagg_decode_prealloc_queue.queue:
+            if self._should_abort_request(recv_req, decode_req.req.rid):
+                logger.debug(
+                    f"Abort decode prealloc queue request. {decode_req.req.rid=}"
+                )
+                decode_req.kv_receiver.abort()
+                self._send_abort_output(decode_req.req, RequestStage.DECODE_PREPARE)
 
-            # Abort requests waiting for kvcache to release tree cache
-            for decode_req in self.disagg_decode_transfer_queue.queue:
-                if recv_req.abort_all or decode_req.req.rid.startswith(recv_req.rid):
-                    logger.debug(f"Abort transfer queue request. {decode_req.req.rid=}")
-                    decode_req.kv_receiver.abort()
+        # Abort requests waiting for kvcache transfer
+        for decode_req in self.disagg_decode_transfer_queue.queue:
+            if self._should_abort_request(recv_req, decode_req.req.rid):
+                logger.debug(
+                    f"Abort decode transfer queue request. {decode_req.req.rid=}"
+                )
+                decode_req.kv_receiver.abort()
+                self._send_abort_output(decode_req.req, RequestStage.DECODE_WAITING)
 
-        # Delete requests in the running batch
+    def _abort_running_batch(self, recv_req: AbortReq):
         if self.cur_batch is self.running_batch or self.cur_batch is None:
             reqs = self.running_batch.reqs
         else:
             reqs = self.running_batch.reqs + self.cur_batch.reqs
 
         for req in reqs:
-            if not req.finished() and (
-                recv_req.abort_all or req.rid.startswith(recv_req.rid)
-            ):
+            if not req.finished() and self._should_abort_request(recv_req, req.rid):
                 # Abort method 3: set `to_finish`
                 # The request will still run one decode forward pass.
                 # Then we reuse all existing code to clean up the KV cache allocation.
                 logger.debug(f"Abort running request. {req.rid=}")
                 req.to_finish = FINISH_ABORT()
+
+                self._send_abort_output(req, RequestStage.DECODE_LOOP)
+
+    def abort_request(self, recv_req: AbortReq):
+        self._abort_waiting_queue(recv_req)
+
+        if self.disaggregation_mode == DisaggregationMode.PREFILL:
+            self._abort_disagg_prefill_queues(recv_req)
+        elif self.disaggregation_mode == DisaggregationMode.DECODE:
+            self._abort_disagg_decode_queues(recv_req)
+
+        self._abort_running_batch(recv_req)
 
     def _pause_engine(self) -> Tuple[List[Req], int]:
         raise NotImplementedError()
