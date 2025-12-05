@@ -824,8 +824,7 @@ class TokenizerMetricsCollector:
         self.num_aborted_requests_total = Counter(
             name="sglang:num_aborted_requests_total",
             documentation="Number of requests aborted.",
-            labelnames=labels.keys()
-            + ["stage"],  # For more information about the stage of the aborted request
+            labelnames=list(labels.keys()) + ["stage"],
         )
 
         if bucket_time_to_first_token is None:
