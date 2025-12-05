@@ -2029,6 +2029,7 @@ class TokenizerManager(TokenizerCommunicatorMixin):
         asyncio.create_task(asyncio.to_thread(background_task))
 
     def _handle_abort_req(self, recv_obj: AbortReq):
+        logger.info("Enter _handle_abort_req")
         if is_health_check_generate_req(recv_obj):
             return
         state = self.rid_to_state[recv_obj.rid]
@@ -2072,7 +2073,7 @@ class TokenizerManager(TokenizerCommunicatorMixin):
             custom_labels = getattr(state.obj, "custom_labels", None)
             if custom_labels:
                 labels.update(custom_labels)
-
+            logger.info("Invoke observe_one_aborted_request")
             self.metrics_collector.observe_one_aborted_request(labels)
 
     def _handle_open_session_req_output(self, recv_obj):
