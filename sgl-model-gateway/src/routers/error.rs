@@ -1,151 +1,155 @@
-//! Centralized error response handling for all routers
-//!
-//! This module provides consistent error responses across OpenAI and gRPC routers,
-//! ensuring all errors follow OpenAI's API error format.
-
 use axum::{
-    http::StatusCode,
+    http::{HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
 use serde_json::json;
 
-/// Create a 500 Internal Server Error response
-///
-/// Use this for unexpected server-side errors, database failures, etc.
-///
-/// # Example
-/// ```ignore
-/// return Err(internal_error("Database connection failed"));
-/// ```
-pub fn internal_error(message: impl Into<String>) -> Response {
-    let msg = message.into();
+pub const HEADER_X_SMG_ERROR_CODE: &str = "X-SMG-Error-Code";
+
+pub fn internal_error(code: impl Into<String>, message: impl Into<String>) -> Response {
+    create_error(StatusCode::INTERNAL_SERVER_ERROR, code, message)
+}
+
+pub fn bad_request(code: impl Into<String>, message: impl Into<String>) -> Response {
+    create_error(StatusCode::BAD_REQUEST, code, message)
+}
+
+pub fn not_found(code: impl Into<String>, message: impl Into<String>) -> Response {
+    create_error(StatusCode::NOT_FOUND, code, message)
+}
+
+pub fn service_unavailable(code: impl Into<String>, message: impl Into<String>) -> Response {
+    create_error(StatusCode::SERVICE_UNAVAILABLE, code, message)
+}
+
+pub fn failed_dependency(code: impl Into<String>, message: impl Into<String>) -> Response {
+    create_error(StatusCode::FAILED_DEPENDENCY, code, message)
+}
+
+pub fn not_implemented(code: impl Into<String>, message: impl Into<String>) -> Response {
+    create_error(StatusCode::NOT_IMPLEMENTED, code, message)
+}
+
+pub fn bad_gateway(code: impl Into<String>, message: impl Into<String>) -> Response {
+    create_error(StatusCode::BAD_GATEWAY, code, message)
+}
+
+pub fn method_not_allowed(code: impl Into<String>, message: impl Into<String>) -> Response {
+    create_error(StatusCode::METHOD_NOT_ALLOWED, code, message)
+}
+
+pub fn create_error(
+    status: StatusCode,
+    code: impl Into<String>,
+    message: impl Into<String>,
+) -> Response {
+    let code_str = code.into();
+    let message_str = message.into();
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        HEADER_X_SMG_ERROR_CODE,
+        HeaderValue::from_str(&code_str).unwrap(),
+    );
+
     (
-        StatusCode::INTERNAL_SERVER_ERROR,
+        status,
+        headers,
         Json(json!({
             "error": {
-                "message": msg,
-                "type": "internal_error",
-                "code": 500
+                "type": status_code_to_str(status),
+                "code": code_str,
+                "message": message_str,
             }
         })),
     )
         .into_response()
 }
 
-/// Create a 400 Bad Request response
-///
-/// Use this for invalid request parameters, malformed JSON, validation errors, etc.
-///
-/// # Example
-/// ```ignore
-/// return Err(bad_request("Invalid conversation ID format"));
-/// ```
-pub fn bad_request(message: impl Into<String>) -> Response {
-    let msg = message.into();
-    (
-        StatusCode::BAD_REQUEST,
-        Json(json!({
-            "error": {
-                "message": msg,
-                "type": "invalid_request_error",
-                "code": 400
-            }
-        })),
-    )
-        .into_response()
+fn status_code_to_str(status_code: StatusCode) -> &'static str {
+    match status_code {
+        // 1xx
+        StatusCode::CONTINUE => "continue",
+        StatusCode::SWITCHING_PROTOCOLS => "switching_protocols",
+        StatusCode::PROCESSING => "processing",
+        StatusCode::EARLY_HINTS => "early_hints",
+
+        // 2xx
+        StatusCode::OK => "ok",
+        StatusCode::CREATED => "created",
+        StatusCode::ACCEPTED => "accepted",
+        StatusCode::NON_AUTHORITATIVE_INFORMATION => "non_authoritative_information",
+        StatusCode::NO_CONTENT => "no_content",
+        StatusCode::RESET_CONTENT => "reset_content",
+        StatusCode::PARTIAL_CONTENT => "partial_content",
+        StatusCode::MULTI_STATUS => "multi_status",
+        StatusCode::ALREADY_REPORTED => "already_reported",
+        StatusCode::IM_USED => "im_used",
+
+        // 3xx
+        StatusCode::MULTIPLE_CHOICES => "multiple_choices",
+        StatusCode::MOVED_PERMANENTLY => "moved_permanently",
+        StatusCode::FOUND => "found",
+        StatusCode::SEE_OTHER => "see_other",
+        StatusCode::NOT_MODIFIED => "not_modified",
+        StatusCode::USE_PROXY => "use_proxy",
+        StatusCode::TEMPORARY_REDIRECT => "temporary_redirect",
+        StatusCode::PERMANENT_REDIRECT => "permanent_redirect",
+
+        // 4xx
+        StatusCode::BAD_REQUEST => "bad_request",
+        StatusCode::UNAUTHORIZED => "unauthorized",
+        StatusCode::PAYMENT_REQUIRED => "payment_required",
+        StatusCode::FORBIDDEN => "forbidden",
+        StatusCode::NOT_FOUND => "not_found",
+        StatusCode::METHOD_NOT_ALLOWED => "method_not_allowed",
+        StatusCode::NOT_ACCEPTABLE => "not_acceptable",
+        StatusCode::PROXY_AUTHENTICATION_REQUIRED => "proxy_authentication_required",
+        StatusCode::REQUEST_TIMEOUT => "request_timeout",
+        StatusCode::CONFLICT => "conflict",
+        StatusCode::GONE => "gone",
+        StatusCode::LENGTH_REQUIRED => "length_required",
+        StatusCode::PRECONDITION_FAILED => "precondition_failed",
+        StatusCode::PAYLOAD_TOO_LARGE => "payload_too_large",
+        StatusCode::URI_TOO_LONG => "uri_too_long",
+        StatusCode::UNSUPPORTED_MEDIA_TYPE => "unsupported_media_type",
+        StatusCode::RANGE_NOT_SATISFIABLE => "range_not_satisfiable",
+        StatusCode::EXPECTATION_FAILED => "expectation_failed",
+        StatusCode::IM_A_TEAPOT => "im_a_teapot",
+        StatusCode::MISDIRECTED_REQUEST => "misdirected_request",
+        StatusCode::UNPROCESSABLE_ENTITY => "unprocessable_entity",
+        StatusCode::LOCKED => "locked",
+        StatusCode::FAILED_DEPENDENCY => "failed_dependency",
+        StatusCode::UPGRADE_REQUIRED => "upgrade_required",
+        StatusCode::PRECONDITION_REQUIRED => "precondition_required",
+        StatusCode::TOO_MANY_REQUESTS => "too_many_requests",
+        StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE => "request_header_fields_too_large",
+        StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS => "unavailable_for_legal_reasons",
+
+        // 5xx
+        StatusCode::INTERNAL_SERVER_ERROR => "internal_server_error",
+        StatusCode::NOT_IMPLEMENTED => "not_implemented",
+        StatusCode::BAD_GATEWAY => "bad_gateway",
+        StatusCode::SERVICE_UNAVAILABLE => "service_unavailable",
+        StatusCode::GATEWAY_TIMEOUT => "gateway_timeout",
+        StatusCode::HTTP_VERSION_NOT_SUPPORTED => "http_version_not_supported",
+        StatusCode::VARIANT_ALSO_NEGOTIATES => "variant_also_negotiates",
+        StatusCode::INSUFFICIENT_STORAGE => "insufficient_storage",
+        StatusCode::LOOP_DETECTED => "loop_detected",
+        StatusCode::NOT_EXTENDED => "not_extended",
+        StatusCode::NETWORK_AUTHENTICATION_REQUIRED => "network_authentication_required",
+
+        _ => "unknown_status_code",
+    }
 }
 
-/// Create a 404 Not Found response
-///
-/// Use this for resources that don't exist (conversations, responses, etc.)
-///
-/// # Example
-/// ```ignore
-/// return Err(not_found(format!("Conversation '{}' not found", id)));
-/// ```
-pub fn not_found(message: impl Into<String>) -> Response {
-    let msg = message.into();
-    (
-        StatusCode::NOT_FOUND,
-        Json(json!({
-            "error": {
-                "message": msg,
-                "type": "invalid_request_error",
-                "code": 404
-            }
-        })),
-    )
-        .into_response()
-}
-
-/// Create a 503 Service Unavailable response
-///
-/// Use this for temporary service issues like no workers available, rate limiting, etc.
-///
-/// # Example
-/// ```ignore
-/// return Err(service_unavailable("No workers available for this model"));
-/// ```
-pub fn service_unavailable(message: impl Into<String>) -> Response {
-    let msg = message.into();
-    (
-        StatusCode::SERVICE_UNAVAILABLE,
-        Json(json!({
-            "error": {
-                "message": msg,
-                "type": "service_unavailable",
-                "code": 503
-            }
-        })),
-    )
-        .into_response()
-}
-
-/// Create a 424 Failed Dependency response
-///
-/// Use this when an external dependency (like MCP server) fails.
-///
-/// # Example
-/// ```ignore
-/// return Err(failed_dependency("Failed to connect to MCP server"));
-/// ```
-pub fn failed_dependency(message: impl Into<String>) -> Response {
-    let msg = message.into();
-    (
-        StatusCode::FAILED_DEPENDENCY,
-        Json(json!({
-            "error": {
-                "message": msg,
-                "type": "external_connector_error",
-                "code": 424
-            }
-        })),
-    )
-        .into_response()
-}
-
-/// Create a 501 Not Implemented response
-///
-/// Use this for features that are not yet implemented or supported.
-///
-/// # Example
-/// ```ignore
-/// return Err(not_implemented("vLLM backend integration is in progress"));
-/// ```
-pub fn not_implemented(message: impl Into<String>) -> Response {
-    let msg = message.into();
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        Json(json!({
-            "error": {
-                "message": msg,
-                "type": "not_implemented_error",
-                "code": 501
-            }
-        })),
-    )
-        .into_response()
+pub fn extract_error_code_from_response<B>(response: &Response<B>) -> &str {
+    response
+        .headers()
+        .get(HEADER_X_SMG_ERROR_CODE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -154,31 +158,31 @@ mod tests {
 
     #[test]
     fn test_internal_error_string() {
-        let response = internal_error("Test error");
+        let response = internal_error("test_error", "Test error");
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 
     #[test]
     fn test_internal_error_format() {
-        let response = internal_error(format!("Error: {}", 42));
+        let response = internal_error("test_error", format!("Error: {}", 42));
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 
     #[test]
     fn test_bad_request() {
-        let response = bad_request("Invalid input");
+        let response = bad_request("invalid_input", "Invalid input");
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     #[test]
     fn test_not_found() {
-        let response = not_found("Resource not found");
+        let response = not_found("resource_not_found", "Resource not found");
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     #[test]
     fn test_service_unavailable() {
-        let response = service_unavailable("No workers");
+        let response = service_unavailable("no_workers", "No workers");
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 }
