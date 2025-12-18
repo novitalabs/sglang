@@ -363,6 +363,13 @@ class ServerArgs:
     speculative_ngram_branch_length: int = 18
     speculative_ngram_capacity: int = 10 * 1000 * 1000
 
+    speculative_disable_by_batch_size: Optional[int] = None
+
+    speculative_suffix_cache_max_depth: int = 64
+    speculative_suffix_max_spec_factor: float = 1.0
+    speculative_suffix_max_spec_offset: float = 0.0
+    speculative_suffix_min_token_prob: float = 0.1
+
     # Expert parallelism
     ep_size: int = 1
     moe_a2a_backend: Literal["none", "deepep", "mooncake"] = "none"
@@ -491,7 +498,12 @@ class ServerArgs:
     enable_dynamic_batch_tokenizer: bool = False
     dynamic_batch_tokenizer_batch_size: int = 32
     dynamic_batch_tokenizer_batch_timeout: float = 0.002
+    speculative_disable_by_batch_size: Optional[int] = None
 
+    speculative_suffix_cache_max_depth: int = 64
+    speculative_suffix_max_spec_factor: float = 1.0
+    speculative_suffix_max_spec_offset: float = 0.0
+    speculative_suffix_min_token_prob: float = 0.1
     # Debug tensor dumps
     debug_tensor_dump_output_folder: Optional[str] = None
     debug_tensor_dump_input_file: Optional[str] = None
@@ -1548,6 +1560,40 @@ class ServerArgs:
                     "Currently ngram speculative decoding does not support dp attention."
                 )
 
+        if self.speculative_algorithm == "SUFFIX":
+            if not self.device.startswith("cuda"):
+                raise ValueError(
+                    "Ngram speculative decoding only supports CUDA device."
+                )
+            if self.max_running_requests is None:
+                self.max_running_requests = 48
+            self.disable_overlap_schedule = True
+            self.enable_mixed_chunk = False
+            self.speculative_eagle_topk = 1
+            if self.speculative_num_draft_tokens is None:
+                raise ValueError(f"speculative_num_draft_tokens must be set")
+            logger.warning(
+                "The overlap scheduler and mixed chunked prefill are disabled because of "
+                "using ngram speculative decoding."
+            )
+
+            if (
+                self.speculative_eagle_topk > 1
+                and self.page_size > 1
+                and self.attention_backend != "flashinfer"
+            ):
+                raise ValueError(
+                    f"speculative_eagle_topk({self.speculative_eagle_topk}) > 1 "
+                    f"with page_size({self.page_size}) > 1 is unstable "
+                    "and produces incorrect results for paged attention backends. "
+                    "This combination is only supported for the 'flashinfer' backend."
+                )
+            if self.enable_dp_attention:
+                # TODO: support dp attention for ngram speculative decoding
+                raise ValueError(
+                    "Currently ngram speculative decoding does not support dp attention."
+                )
+
     def _handle_load_format(self):
         if (
             self.load_format == "auto" or self.load_format == "gguf"
@@ -2579,7 +2625,7 @@ class ServerArgs:
         parser.add_argument(
             "--speculative-algorithm",
             type=str,
-            choices=["EAGLE", "EAGLE3", "NEXTN", "STANDALONE", "NGRAM"],
+            choices=["EAGLE", "EAGLE3", "NEXTN", "STANDALONE", "NGRAM", "SUFFIX"],
             help="Speculative algorithm.",
         )
         parser.add_argument(
@@ -2691,6 +2737,40 @@ class ServerArgs:
             type=int,
             default=ServerArgs.speculative_ngram_capacity,
             help="The cache capacity for ngram speculative decoding.",
+        )
+
+        parser.add_argument(
+            "--speculative-suffix-cache-max-depth",
+            type=int,
+            help="speculative-suffix-cache-max-depth",
+            default=ServerArgs.speculative_suffix_cache_max_depth,
+        )
+
+        parser.add_argument(
+            "--speculative-suffix-max-spec-factor",
+            type=float,
+            help="speculative-suffix_max_spec_factor",
+            default=ServerArgs.speculative_suffix_max_spec_factor,
+        )
+
+        parser.add_argument(
+            "--speculative-suffix-max-spec-offset",
+            type=float,
+            help="speculative-suffix_max_spec_offset",
+            default=ServerArgs.speculative_suffix_max_spec_offset,
+        )
+
+        parser.add_argument(
+            "--speculative-suffix-min-token-prob",
+            type=float,
+            help="speculative-suffix_min_token_prob",
+            default=ServerArgs.speculative_suffix_min_token_prob,
+        )
+
+        parser.add_argument(
+            "--speculative-disable-by-batch-size",
+            action="store_true",
+            help="spec disable by batch size",
         )
 
         # Expert parallelism

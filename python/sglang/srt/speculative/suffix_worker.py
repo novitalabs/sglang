@@ -11,7 +11,7 @@ from sglang.srt.managers.tp_worker import TpModelWorker
 from sglang.srt.model_executor.forward_batch_info import ForwardMode
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
-from sglang.srt.speculative.suffix_cache import SuffixCache, SuffixSpecResult
+from sglang.srt.speculative.suffix_cache import SuffixCache
 from sglang.srt.speculative.suffix_info import SuffixVerifyInput
 
 USE_FULL_MASK = True
@@ -47,8 +47,7 @@ class SuffixWorker:
 
         self._init_preallocated_tensors()
 
-        self.suffix_cache = SuffixCache(
-            self.suffix_cache_max_depth)
+        self.suffix_cache = SuffixCache(self.suffix_cache_max_depth)
 
     def clear_cache_pool(self):
         """Clear the suffix cache pool"""
@@ -249,7 +248,9 @@ class SuffixWorker:
             can_run_cuda_graph=can_run_cuda_graph,
         )
 
-    def _extract_accepted_tokens(self, batch: ScheduleBatch, spec_info) -> list[list[int]]:
+    def _extract_accepted_tokens(
+        self, batch: ScheduleBatch, spec_info
+    ) -> list[list[int]]:
         """Extract the actually accepted tokens from verify results
 
         Similar to the original implementation, we need to get the tokens that were
@@ -268,13 +269,15 @@ class SuffixWorker:
             # accept_length[i] is the number of draft tokens accepted
             # We need to include the bonus token as well (+1)
             sample_len = accept_length_cpu[i] + 1
-            sample_ids = verified_id_cpu[offset:offset+sample_len]
+            sample_ids = verified_id_cpu[offset : offset + sample_len]
             sampled_token_ids.append(sample_ids)
             offset += sample_len
 
         return sampled_token_ids
 
-    def _update_suffix_cache(self, batch: ScheduleBatch, sampled_token_ids: list[list[int]]) -> None:
+    def _update_suffix_cache(
+        self, batch: ScheduleBatch, sampled_token_ids: list[list[int]]
+    ) -> None:
         """Update suffix cache with accepted tokens from verification"""
         seen_req_ids = set()
 
@@ -304,4 +307,3 @@ class SuffixWorker:
         for req_id in self.suffix_cache.cached_prompt_ids():
             if req_id not in seen_req_ids:
                 self.suffix_cache.evict_prompt(req_id)
-

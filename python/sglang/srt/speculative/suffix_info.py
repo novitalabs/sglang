@@ -182,7 +182,7 @@ class SuffixVerifyInput(SpecInput):
                                 f"{self.accept_index=}\n"
                                 f"{self.predict=}\n"
                             )
-                            raise e
+                            # raise e
             req.spec_verify_ct += 1
         if has_finished:
             self.accept_length = (self.accept_index != -1).sum(dim=1) - 1

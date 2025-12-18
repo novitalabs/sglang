@@ -12,6 +12,7 @@ class SpeculativeAlgorithm(IntEnum):
     EAGLE3 = auto()
     STANDALONE = auto()
     NGRAM = auto()
+    SUFFIX = auto()
 
     def is_none(self):
         return self == SpeculativeAlgorithm.NONE
@@ -28,6 +29,9 @@ class SpeculativeAlgorithm(IntEnum):
     def is_ngram(self):
         return self == SpeculativeAlgorithm.NGRAM
 
+    def is_suffix(self):
+        return self == SpeculativeAlgorithm.SUFFIX
+
     @lru_cache(maxsize=None)
     @staticmethod
     def from_string(name: str):
@@ -36,6 +40,7 @@ class SpeculativeAlgorithm(IntEnum):
             "EAGLE3": SpeculativeAlgorithm.EAGLE3,
             "STANDALONE": SpeculativeAlgorithm.STANDALONE,
             "NGRAM": SpeculativeAlgorithm.NGRAM,
+            "SUFFIX": SpeculativeAlgorithm.SUFFIX,
             None: SpeculativeAlgorithm.NONE,
         }
         if name is not None:
@@ -49,6 +54,7 @@ class SpecInputType(IntEnum):
     EAGLE_DRAFT = auto()
     EAGLE_VERIFY = auto()
     NGRAM_VERIFY = auto()
+    SUFFIX_VERIFY = auto()
 
 
 class SpecInput(ABC):
@@ -64,6 +70,7 @@ class SpecInput(ABC):
         return self.spec_input_type in {
             SpecInputType.EAGLE_VERIFY,
             SpecInputType.NGRAM_VERIFY,
+            SpecInputType.SUFFIX_VERIFY,
         }
 
     @abstractmethod
