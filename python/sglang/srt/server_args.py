@@ -370,6 +370,8 @@ class ServerArgs:
     speculative_suffix_max_spec_offset: float = 0.0
     speculative_suffix_min_token_prob: float = 0.1
 
+    speculative_suffix_max_cached_requests: int = 10000
+
     # Expert parallelism
     ep_size: int = 1
     moe_a2a_backend: Literal["none", "deepep", "mooncake"] = "none"
@@ -2765,6 +2767,13 @@ class ServerArgs:
             type=float,
             help="speculative-suffix_min_token_prob",
             default=ServerArgs.speculative_suffix_min_token_prob,
+        )
+
+        parser.add_argument(
+            "--speculative-suffix-max-cached-requests",
+            type=int,
+            help="speculative-suffix-max-cached-requests",
+            default=ServerArgs.speculative_suffix_max_cached_requests,
         )
 
         parser.add_argument(

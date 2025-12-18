@@ -3,6 +3,7 @@ from typing import List, Optional
 
 import numpy as np
 import torch
+from arctic_inference.suffix_decoding import SuffixDecodingCache
 from sgl_kernel.speculative import reconstruct_indices_from_tree_mask
 
 from sglang.srt.managers.schedule_batch import ScheduleBatch
@@ -11,7 +12,6 @@ from sglang.srt.managers.tp_worker import TpModelWorker
 from sglang.srt.model_executor.forward_batch_info import ForwardMode
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
-from sglang.srt.speculative.suffix_cache import SuffixCache
 from sglang.srt.speculative.suffix_info import SuffixVerifyInput
 
 USE_FULL_MASK = True
@@ -42,16 +42,24 @@ class SuffixWorker:
         self.suffix_max_spec_offset = server_args.speculative_suffix_max_spec_offset
         self.suffix_min_token_prob = server_args.speculative_suffix_min_token_prob
 
+        self.suffix_max_cached_requests = (
+            server_args.speculative_suffix_max_cached_requests
+        )
+
         self.max_batch_size = target_worker.max_running_requests
         self.device = f"cuda:{gpu_id}" if gpu_id >= 0 else "cuda"
 
         self._init_preallocated_tensors()
 
-        self.suffix_cache = SuffixCache(self.suffix_cache_max_depth)
+        self.suffix_cache = SuffixDecodingCache(
+            self.suffix_cache_max_depth, self.suffix_max_cached_requests
+        )
 
     def clear_cache_pool(self):
         """Clear the suffix cache pool"""
-        self.suffix_cache = SuffixCache(self.suffix_cache_max_depth)
+        self.suffix_cache = SuffixDecodingCache(
+            self.suffix_cache_max_depth, self.suffix_max_cached_requests
+        )
 
     def _efficient_concat_last_n(self, seq1: List[int], seq2: List[int], n: int):
         seq2_len = len(seq2)
