@@ -196,11 +196,10 @@ __global__ void fusedQKNormRopeKernel(
   float sin_vals[numElemsPerThread];
   float pos_id = static_cast<float>(position_ids[tokenIdx]);
   int const rotary_lanes = rotary_dim / numElemsPerThread;  // rotary range
-  bool const in_rotary = (laneId < rotary_lanes);
-
-  if constexpr (interleave) {
-    // Perform interleaving. Fill cos_vals and sin_vals.
-    if (in_rotary) {
+  bool const applyRotary = (laneId < rotary_lanes);
+  if (applyRotary) {
+    if constexpr (interleave) {
+      // Perform interleaving. Fill cos_vals and sin_vals.
       for (int i = 0; i < numElemsPerThread; i++) {
         elements2[i] = (i % 2 == 0) ? -elements[i + 1] : elements[i - 1];
 
@@ -210,15 +209,15 @@ __global__ void fusedQKNormRopeKernel(
         float theta = pos_id * freq;
         __sincosf(theta, &sin_vals[i], &cos_vals[i]);
       }
-    }
 
-  } else {
-    // Neox style
-    // Before data exchange with in warp, we need to sync.
-    __syncwarp();
-    if (in_rotary) {
+    } else {
+      // Neox style
+      // Before data exchange with in warp, we need to sync.
+      __syncwarp();
       int const half_rotary_lanes = rotary_lanes / 2;
-      unsigned int active_mask = (1u << rotary_lanes) - 1;  // 低16位为1: 0x0000FFFF
+      unsigned int active_mask = (1u << rotary_lanes) - 1;
+      // Limitation: The operation below requires half_rotary_lanes to be a power of 2.
+      // because it relies on __shfl_xor_sync to exchange data within a warp.
       for (int i = 0; i < numElemsPerThread; i++) {
         elements2[i] = __shfl_xor_sync(active_mask, elements[i], half_rotary_lanes);
         if (laneId < half_rotary_lanes) {
@@ -232,12 +231,10 @@ __global__ void fusedQKNormRopeKernel(
         float theta = pos_id * freq;
         __sincosf(theta, &sin_vals[i], &cos_vals[i]);
       }
+      // __shfl_xor_sync does not provide memfence. Need to sync again.
+      __syncwarp();
     }
-    // __shfl_xor_sync does not provide memfence. Need to sync again.
-    __syncwarp();
-  }
 
-  if (in_rotary) {
     for (int i = 0; i < numElemsPerThread; i++) {
       elements[i] = (elements[i] * cos_vals[i] + elements2[i] * sin_vals[i]) * attention_factor;
     }
@@ -388,7 +385,13 @@ void fused_qk_norm_rope(
   TORCH_CHECK(q_weight.size(0) == head_dim, "Query weights size must match head dimension");
   TORCH_CHECK(k_weight.size(0) == head_dim, "Key weights size must match head dimension");
   TORCH_CHECK(rotary_dim % (head_dim / 32) == 0, "rotary_dim must be divisible by numElemsPerThread");
-  TORCH_CHECK((rotary_dim / (head_dim / 32)) % 2 == 0, "rotary_lanes must be even for neox style");
+  if (is_neox) {
+    int64_t half_rotary_lanes = rotary_dim / (head_dim / 32) / 2;
+    TORCH_CHECK(
+        half_rotary_lanes >= 1 && (half_rotary_lanes & (half_rotary_lanes - 1)) == 0,
+        "half_rotary_lanes must be a power of 2 for neox style, got ",
+        half_rotary_lanes);
+  }
   CHECK_INPUT(qkv, torch::kBFloat16);
   CHECK_INPUT(position_ids, torch::kInt32);
   CHECK_INPUT(q_weight, torch::kBFloat16);
