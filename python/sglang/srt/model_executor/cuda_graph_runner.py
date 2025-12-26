@@ -429,12 +429,22 @@ class CudaGraphRunner:
             else True
         )
 
+        is_suffix_supported = (
+            (
+                forward_batch.batch_size * self.num_tokens_per_bs
+                == forward_batch.input_ids.numel()
+            )
+            if self.model_runner.spec_algorithm.is_suffix()
+            else True
+        )
+
         return (
             is_bs_supported
             and is_encoder_lens_supported
             and is_tbo_supported
             and capture_hidden_mode_matches
             and is_ngram_supported
+            and is_suffix_supported
         )
 
     def _init_profile_context_and_memory_record(self):
@@ -920,7 +930,7 @@ class CudaGraphRunner:
 
             spec_info = SuffixVerifyInput(
                 draft_token=None,
-                tree_mask=self.custom_mask,
+                tree_mask=self.buffers.custom_mask,
                 positions=None,
                 retrive_index=None,
                 retrive_next_token=None,

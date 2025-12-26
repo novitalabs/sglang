@@ -1,9 +1,9 @@
 import logging
-from typing import List, Optional
+from typing import Hashable, List, Optional, Tuple
 
 import numpy as np
 import torch
-from arctic_inference.suffix_decoding import SuffixDecodingCache
+from arctic_inference.suffix_decoding import SuffixDecodingCache, SuffixDecodingDraft
 from sgl_kernel.speculative import reconstruct_indices_from_tree_mask
 
 from sglang.srt.managers.schedule_batch import ScheduleBatch
@@ -17,6 +17,150 @@ from sglang.srt.speculative.suffix_info import SuffixVerifyInput
 USE_FULL_MASK = True
 
 logger = logging.getLogger(__name__)
+
+
+class SuffixCache(SuffixDecodingCache):
+    def batch_get(
+        self,
+        batch_tokens: List[List[int]],
+        req_ids: List[Hashable] = None,
+        draft_token_num: int = 8,
+        max_spec_factor: float = 1.0,
+        max_spec_offset: float = 0.0,
+        min_token_prob: float = 0.1,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Batch version of speculate for compatibility with N-gram interface.
+
+        Args:
+            batch_tokens: List of token sequences, one per request
+            req_ids: List of request IDs for accessing cached prompts
+            draft_token_num: Number of draft tokens to generate per request
+            max_spec_factor: Maximum speculation factor
+            max_spec_offset: Maximum speculation offset
+            min_token_prob: Minimum token probability threshold
+
+        Returns:
+            Tuple of (draft_tokens, tree_mask) as numpy arrays
+            - draft_tokens: shape (bs * draft_token_num,)
+            - tree_mask: shape (bs * draft_token_num * draft_token_num,)
+        """
+        bs = len(batch_tokens)
+        if req_ids is None:
+            req_ids = [None] * bs
+
+        all_draft_tokens = []
+        all_masks = []
+
+        for i, tokens in enumerate(batch_tokens):
+            req_id = req_ids[i]
+
+            # Get speculative tokens using suffix cache
+            if len(tokens) == 0 or req_id is None or req_id not in self.active_requests:
+                # Empty pattern or request not active, return default zeros
+                result = SuffixDecodingDraft()
+            else:
+                # Prepare context (limit to max_tree_depth)
+                context = (
+                    tokens
+                    if len(tokens) <= self.max_tree_depth
+                    else tokens[-self.max_tree_depth :]
+                )
+
+                try:
+                    # Use speculate method with req_id (only works for active requests)
+                    result = self.speculate(
+                        req_id=req_id,
+                        context=context,
+                        max_spec_tokens=draft_token_num,
+                        max_spec_factor=max_spec_factor,
+                        max_spec_offset=max_spec_offset,
+                        min_token_prob=min_token_prob,
+                        use_tree_spec=False,  # Use simple chain for compatibility
+                    )
+                except Exception as e:
+                    # If speculation fails, return empty result
+                    result = SuffixDecodingDraft()
+
+            # Pad or truncate to draft_token_num
+            draft_tokens = result.token_ids[:draft_token_num]
+            parents = result.parents[:draft_token_num] if result.parents else []
+
+            if len(tokens) > 0:
+                last_token = tokens[-1]
+                # Prepend last_token and adjust parents
+                if len(draft_tokens) == 0:
+                    # No speculation results
+                    draft_tokens = [last_token]
+                    parents = [-1]
+                else:
+                    # Have speculation results, but still prepend last_token
+                    # When prepending last_token at position 0, ALL parent indices shift by +1
+                    # because all speculation tokens move one position to the right
+                    # Example: original parents [-1, 0, 1, 2] becomes [-1, 0, 1, 2, 3] after prepending
+                    #   - prepended token at pos 0: parent=-1 (root)
+                    #   - speculation token 0 (now at pos 1): parent=0 (points to prepended token)
+                    #   - speculation token 1 (now at pos 2): parent=1 (points to spec token 0)
+                    #   - speculation token 2 (now at pos 3): parent=2 (points to spec token 1)
+                    parents = [-1] + [p + 1 for p in parents]
+                    draft_tokens = [last_token] + draft_tokens
+                    # Truncate to draft_token_num
+                    draft_tokens = draft_tokens[:draft_token_num]
+                    parents = parents[:draft_token_num]
+
+            draft_tokens += [0] * (draft_token_num - len(draft_tokens))
+
+            # Build tree mask from parents
+            mask = self._build_tree_mask_from_parents(parents, draft_token_num)
+
+            all_draft_tokens.extend(draft_tokens)
+            all_masks.append(mask)
+
+        # Flatten masks to match N-gram format: (bs * draft_token_num * draft_token_num,)
+        draft_tokens_array = np.array(all_draft_tokens, dtype=np.int64)
+        mask_array = np.array(all_masks, dtype=np.int64).reshape(-1)
+
+        return draft_tokens_array, mask_array
+
+    def _build_tree_mask_from_parents(
+        self, parents: List[int], draft_token_num: int
+    ) -> np.ndarray:
+        """
+        Build tree attention mask from parent indices.
+
+        This implementation follows the N-gram C++ logic:
+        - Token i can see all tokens that its parent can see
+        - Token i can also see itself
+
+        Args:
+            parents: List of parent indices for each token
+            draft_token_num: Size of the mask matrix
+
+        Returns:
+            Attention mask of shape (draft_token_num, draft_token_num)
+            mask[i, j] = 1 means token i can attend to token j
+        """
+        mask = np.zeros((draft_token_num, draft_token_num), dtype=np.int64)
+
+        # Pad parents if needed
+        parents_padded = parents + [0] * (draft_token_num - len(parents))
+
+        # Initialize: first token (index 0) can see itself
+        mask[0, 0] = 1
+
+        for i in range(1, draft_token_num):  # Start from 1, as mask[0,0] already set
+            parent_idx = parents_padded[i]
+
+            if parent_idx != -1 and parent_idx < draft_token_num:
+                # Key: Inherit visibility from parent
+                # Copy the first (parent_idx + 1) elements from parent's row
+                # This matches the N-gram C++ logic: memcpy(&info.mask[i * n], &info.mask[prevs[i] * n], prevs[i] + 1)
+                mask[i, : parent_idx + 1] = mask[parent_idx, : parent_idx + 1]
+
+            # Each token can always see itself
+            mask[i, i] = 1
+
+        return mask
 
 
 class SuffixWorker:
@@ -51,14 +195,16 @@ class SuffixWorker:
 
         self._init_preallocated_tensors()
 
-        self.suffix_cache = SuffixDecodingCache(
-            self.suffix_cache_max_depth, self.suffix_max_cached_requests
+        self.suffix_cache = SuffixCache(
+            max_tree_depth=self.suffix_cache_max_depth,
+            max_cached_requests=self.suffix_max_cached_requests,
         )
 
     def clear_cache_pool(self):
         """Clear the suffix cache pool"""
-        self.suffix_cache = SuffixDecodingCache(
-            self.suffix_cache_max_depth, self.suffix_max_cached_requests
+        self.suffix_cache = SuffixCache(
+            max_tree_depth=self.suffix_cache_max_depth,
+            max_cached_requests=self.suffix_max_cached_requests,
         )
 
     def _efficient_concat_last_n(self, seq1: List[int], seq2: List[int], n: int):
@@ -149,7 +295,6 @@ class SuffixWorker:
             max_spec_factor=self.suffix_max_spec_factor,
             max_spec_offset=self.suffix_max_spec_offset,
             min_token_prob=self.suffix_min_token_prob,
-            use_cached_prompt=True,
         )
 
         total_draft_token_num = len(req_drafts)
@@ -296,9 +441,9 @@ class SuffixWorker:
             if not sampled_ids:
                 continue
 
-            if not self.suffix_cache.has_cached_prompt(req_id):
+            if req_id not in self.suffix_cache.active_requests:
                 prompt_token_ids = batch.reqs[i].origin_input_ids
-                self.suffix_cache.cache_prompt(req_id, prompt_token_ids)
+                self.suffix_cache.start_request(req_id, prompt_token_ids)
 
                 # IMPORTANT: Also cache all previously generated output tokens
                 # (before the current sampled_ids) to maintain continuity
@@ -307,11 +452,11 @@ class SuffixWorker:
                 previous_output_len = len(output_ids) - len(sampled_ids)
                 if previous_output_len > 0:
                     previous_tokens = output_ids[:previous_output_len]
-                    self.suffix_cache.update_response(req_id, previous_tokens)
+                    self.suffix_cache.add_active_response(req_id, previous_tokens)
 
-            self.suffix_cache.update_response(req_id, sampled_ids)
+            self.suffix_cache.add_active_response(req_id, sampled_ids)
 
-        # Evict prompts that are not seen
-        for req_id in self.suffix_cache.cached_prompt_ids():
+        # Stop requests that are not seen (request completed)
+        for req_id in list(self.suffix_cache.active_requests):
             if req_id not in seen_req_ids:
-                self.suffix_cache.evict_prompt(req_id)
+                self.suffix_cache.stop_request(req_id)
